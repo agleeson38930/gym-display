@@ -8,7 +8,7 @@ from evdev import InputDevice, categorize, ecodes
 import RPi.GPIO as GPIO
 
 class DirectTestCounter:
-    def __init__(self, logo_path="logo.png", debounce_time=0.5):
+    def __init__(self, logo_path="/home/dietpi/logo.png", debounce_time=0.5):
         self.count = 0
         self.logo_path = logo_path
         self.debounce_time = debounce_time
@@ -18,6 +18,7 @@ class DirectTestCounter:
         self.input_buffer = ""
         self.last_flash_time = 0
         self.flash_interval = 0.5
+        self.triggered = False
 
         self.beam_pins = [26, 16, 5, 6]
         GPIO.setmode(GPIO.BCM)
@@ -62,26 +63,37 @@ class DirectTestCounter:
             self.font = ImageFont.load_default()
 
     def init(self):
-        print("Starting test hit counter...")
-        init_load_wait_time = 2
+        print("Waiting for system readiness...")
+        time.sleep(5)  # NEW: Delay to allow hardware/framebuffer to initialize
+
+        print("Waiting for first input to start...")
         if os.path.exists(self.logo_path):
-            print(f"Displaying logo for {init_load_wait_time} seconds: {self.logo_path}")
-            self.display_image(self.logo_path, init_load_wait_time)
+            self.display_image(self.logo_path)
         else:
             print(f"Logo file not found: {self.logo_path}")
-        self.display_number(0)
+
+        kb_thread = threading.Thread(target=self.check_for_keyboard_input)
+        kb_thread.daemon = True
+        kb_thread.start()
+
+        while not self.triggered:
+            for pin in self.beam_pins:
+                if GPIO.input(pin) == GPIO.LOW:
+                    print("Beam broken. Starting counter.")
+                    self.triggered = True
+                    self.count = 1
+                    self.update_display()
+                    return
+            time.sleep(0.01)
 
     def run(self):
         try:
             self.init()
-            kb_thread = threading.Thread(target=self.check_for_keyboard_input)
-            kb_thread.daemon = True
-            kb_thread.start()
-            print("Counter started.")
+            print("Counter active.")
 
             while True:
                 current_time = time.time()
-                if current_time - self.last_hit_time > self.debounce_time:
+                if self.triggered and (current_time - self.last_hit_time > self.debounce_time):
                     for pin in self.beam_pins:
                         if GPIO.input(pin) == GPIO.LOW:
                             self.increment_counter()
@@ -100,7 +112,7 @@ class DirectTestCounter:
         GPIO.cleanup()
 
     def check_for_keyboard_input(self):
-        device_path = '/dev/input/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0-event-kbd'
+        device_path = '/dev/input/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0-event-kbd'
         try:
             dev = InputDevice(device_path)
             print(f"Listening for keypresses from: {device_path}")
@@ -114,6 +126,14 @@ class DirectTestCounter:
                 if key_event.keystate == key_event.key_down:
                     keycode = key_event.keycode
                     print(f"Key pressed: {keycode}")
+
+                    if not self.triggered:
+                        print("Keyboard trigger detected. Starting counter.")
+                        self.triggered = True
+                        self.count = 1
+                        self.update_display()
+                        continue
+
                     if keycode == 'KEY_MINUS':
                         self.decrement_counter()
                     elif keycode in ('KEY_EQUAL', 'KEY_KPPLUS'):
@@ -174,7 +194,6 @@ class DirectTestCounter:
         draw = ImageDraw.Draw(img)
         text = str(number)
 
-        # Try largest font, reduce until it fits
         max_font_size = 60
         min_font_size = 10
         font_size = max_font_size
@@ -190,7 +209,7 @@ class DirectTestCounter:
             font_size -= 1
 
         x_position = (self.matrix.width - text_width) // 2
-        y_position = (self.matrix.height - text_height) // 2 - 5  # Slight upward nudge
+        y_position = (self.matrix.height - text_height) // 2 - 5
         if y_position < 0:
             y_position = 0
 
